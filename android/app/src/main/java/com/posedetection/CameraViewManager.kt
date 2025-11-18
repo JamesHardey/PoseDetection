@@ -6,6 +6,8 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.view.Choreographer
+import android.view.View
 import android.view.ViewGroup
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -144,6 +146,9 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
         constraintLayout.tag = previewView
         constraintLayout.setTag(R.id.pose_overlay_tag, overlayView)
         
+        // Install hierarchy fitter AFTER adding views - critical for CameraX
+        installHierarchyFitter(constraintLayout)
+        
         // Store reference to current view
         currentView = constraintLayout
         
@@ -152,8 +157,31 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
         return constraintLayout
     }
 
+    private fun installHierarchyFitter(view: ViewGroup) {
+        // CameraX black screen fix - continuous layout with Choreographer
+        // Solution from: https://stackoverflow.com/questions/79664703
+        Choreographer.getInstance().postFrameCallback(object : Choreographer.FrameCallback {
+            override fun doFrame(frameTimeNanos: Long) {
+                manuallyLayoutChildren(view)
+                view.viewTreeObserver.dispatchOnGlobalLayout()
+                Choreographer.getInstance().postFrameCallback(this)
+            }
+        })
+    }
+    
+    private fun manuallyLayoutChildren(viewGroup: ViewGroup) {
+        for (i in 0 until viewGroup.childCount) {
+            val child = viewGroup.getChildAt(i)
+            child.measure(
+                View.MeasureSpec.makeMeasureSpec(viewGroup.measuredWidth, View.MeasureSpec.EXACTLY),
+                View.MeasureSpec.makeMeasureSpec(viewGroup.measuredHeight, View.MeasureSpec.EXACTLY)
+            )
+            child.layout(0, 0, child.measuredWidth, child.measuredHeight)
+        }
+    }
+
     @ReactProp(name = "cameraType")
-    fun setCameraType(view: ConstraintLayout, cameraType: String?) {
+    fun setCameraType(view: ConstraintLayout, cameraType: String? = "front") {
         currentLensFacing = when (cameraType) {
             "front" -> CameraSelector.LENS_FACING_FRONT
             else -> CameraSelector.LENS_FACING_BACK
