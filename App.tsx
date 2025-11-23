@@ -21,7 +21,7 @@ import ResultScreen from './src/screens/ResultScreen';
 export type RootStackParamList = {
   Intro: undefined;
   Camera: undefined;
-  Result: { imageUri: string };
+  Result: { imageUri: string; sideImageUri?: string };
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   requireNativeComponent,
   ViewStyle,
@@ -6,14 +6,18 @@ import {
   View,
   Text,
   Button,
+  TouchableOpacity,
   Platform,
   PermissionsAndroid,
+  UIManager,
+  findNodeHandle,
 } from 'react-native';
 import CameraXModule from '../modules/CameraXModule';
 
 interface CameraViewProps {
   style?: ViewStyle;
   cameraType?: 'front' | 'back';
+  onBothCaptured?: () => void;
 }
 
 const NativeCameraView = requireNativeComponent<CameraViewProps>('CameraView');
@@ -21,10 +25,12 @@ const NativeCameraView = requireNativeComponent<CameraViewProps>('CameraView');
 export const CameraView: React.FC<CameraViewProps> = ({
   style,
   cameraType = 'back',
+  onBothCaptured,
 }) => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const [isChecking, setIsChecking] = useState<boolean>(true);
   const [error, setError] = useState<string>('');
+  const cameraViewRef = useRef(null);
 
   useEffect(() => {
     checkPermission();
@@ -98,6 +104,20 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
   };
 
+  const handleViewResults = () => {
+    if (onBothCaptured) {
+      const viewId = findNodeHandle(cameraViewRef.current);
+      if (viewId) {
+        UIManager.dispatchViewManagerCommand(
+          viewId,
+          (UIManager.getViewManagerConfig('CameraView').Commands.navigateToResult as any).toString(),
+          []
+        );
+      }
+      onBothCaptured();
+    }
+  };
+
   if (isChecking) {
     return (
       <View style={[styles.container, style]}>
@@ -127,7 +147,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   }
 
   console.log('Rendering NativeCameraView with cameraType:', cameraType);
-  return <NativeCameraView style={style} cameraType={cameraType} />;
+  return <NativeCameraView ref={cameraViewRef} style={style} cameraType={cameraType} />;
 };
 
 const styles = StyleSheet.create({

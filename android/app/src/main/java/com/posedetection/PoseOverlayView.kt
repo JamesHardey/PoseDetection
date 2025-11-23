@@ -21,9 +21,11 @@ class PoseOverlayView @JvmOverloads constructor(
     private var bitmap: Bitmap? = null
     private var pose: Pose? = null
     private var accuracy: PostureAccuracy? = null
+    private var sideAccuracy: SidePoseAccuracy? = null
     private var isPerfectPose: Boolean = false
     private var countdownValue: Int = 0
     private var isCountingDown: Boolean = false
+    private var currentStage: PoseStage = PoseStage.FRONT_POSE
 
     private val goodPaint = Paint().apply {
         color = Color.GREEN
@@ -92,13 +94,34 @@ class PoseOverlayView @JvmOverloads constructor(
         newAccuracy: PostureAccuracy?,
         perfect: Boolean,
         countdown: Int,
-        counting: Boolean
+        counting: Boolean,
+        stage: PoseStage = PoseStage.FRONT_POSE
     ) {
         pose = newPose
         accuracy = newAccuracy
+        sideAccuracy = null
         isPerfectPose = perfect
         countdownValue = countdown
         isCountingDown = counting
+        currentStage = stage
+        invalidate()
+    }
+    
+    fun updateSidePose(
+        newPose: Pose?,
+        newSideAccuracy: SidePoseAccuracy?,
+        perfect: Boolean,
+        countdown: Int,
+        counting: Boolean,
+        stage: PoseStage = PoseStage.SIDE_POSE
+    ) {
+        pose = newPose
+        accuracy = null
+        sideAccuracy = newSideAccuracy
+        isPerfectPose = perfect
+        countdownValue = countdown
+        isCountingDown = counting
+        currentStage = stage
         invalidate()
     }
 
@@ -168,6 +191,19 @@ class PoseOverlayView @JvmOverloads constructor(
                 statusPaint
             )
         }
+        
+        // Draw stage instruction
+        val stageText = when (currentStage) {
+            PoseStage.FRONT_POSE -> "Front Pose: Stand facing camera"
+            PoseStage.SIDE_POSE -> "Side Pose: Turn sideways to camera"
+        }
+        statusPaint.color = if (currentStage == PoseStage.FRONT_POSE) Color.GREEN else Color.CYAN
+        canvas.drawText(
+            stageText,
+            canvasWidth / 2f,
+            canvasHeight - 100f,
+            statusPaint
+        )
     }
     
     private fun drawPoseConnections(
@@ -293,7 +329,8 @@ data class PostureMetrics(
     val spineAngle: Double,
     val hipAngleLeft: Double,
     val hipAngleRight: Double,
-    val shoulderLevelDiff: Double
+    val shoulderLevelDiff: Double,
+    val legSeparationAngle: Double
 )
 
 data class ReferencePose(
@@ -308,7 +345,9 @@ data class ReferencePose(
     val hipAngleRight: Double,
     val hipAngleTolerance: Double,
     val shoulderLevelDiff: Double,
-    val shoulderLevelTolerance: Double
+    val shoulderLevelTolerance: Double,
+    val legSeparationAngle: Double,
+    val legSeparationTolerance: Double
 )
 
 data class PostureAccuracy(
@@ -320,6 +359,7 @@ data class PostureAccuracy(
     val hipAccurateLeft: Boolean,
     val hipAccurateRight: Boolean,
     val shoulderLevelAccurate: Boolean,
+    val legSeparationAccurate: Boolean,
 
     val shoulderDiffLeft: Double,
     val shoulderDiffRight: Double,
@@ -327,7 +367,8 @@ data class PostureAccuracy(
     val elbowDiffRight: Double,
     val spineDiff: Double,
     val hipDiffLeft: Double,
-    val hipDiffRight: Double
+    val hipDiffRight: Double,
+    val legSeparationDiff: Double
 )
 
 data class TargetBox(
@@ -340,4 +381,51 @@ data class TargetBox(
 data class PositionCheck(
     val inBox: Boolean,
     val issues: List<String>
+)
+
+enum class PoseStage {
+    FRONT_POSE,
+    SIDE_POSE
+}
+
+data class SidePoseReference(
+    val neckHeadAngle: Double,
+    val neckHeadTolerance: Double,
+    val armAngle: Double,
+    val armTolerance: Double,
+    val spineVerticalAngle: Double,
+    val spineTolerance: Double,
+    val legStraightAngle: Double,
+    val legTolerance: Double,
+    val shoulderDepthDiff: Double,
+    val shoulderDepthTolerance: Double
+)
+
+data class SidePoseMetrics(
+    val neckHeadAngle: Double,
+    val leftArmAngle: Double,
+    val rightArmAngle: Double,
+    val spineAngle: Double,
+    val leftLegAngle: Double,
+    val rightLegAngle: Double,
+    val shoulderDepthDiff: Double,
+    val shoulderHorizontalAlignment: Double,
+    val armsOverlapping: Double,
+    val legsOverlapping: Double
+)
+
+data class SidePoseAccuracy(
+    val neckHeadAccurate: Boolean,
+    val leftArmAccurate: Boolean,
+    val rightArmAccurate: Boolean,
+    val spineAccurate: Boolean,
+    val leftLegAccurate: Boolean,
+    val rightLegAccurate: Boolean,
+    val isSideView: Boolean,
+    val neckHeadDiff: Double,
+    val leftArmDiff: Double,
+    val rightArmDiff: Double,
+    val spineDiff: Double,
+    val leftLegDiff: Double,
+    val rightLegDiff: Double
 )

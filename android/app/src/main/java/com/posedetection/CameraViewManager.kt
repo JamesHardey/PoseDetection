@@ -39,6 +39,7 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
     
     companion object {
         private const val TAG = "CameraViewManager"
+        private const val COMMAND_NAVIGATE_TO_RESULT = 1
     }
 
     private var cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -48,6 +49,12 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
     private var textToSpeech: TextToSpeech? = null
     private var lastSpokenTime = 0L
     private val SPEECH_COOLDOWN = 3000L // 3 seconds between voice instructions
+    
+    // Modular components
+    private val poseValidator = PoseValidator()
+    private val sidePoseValidator = SidePoseValidator()
+    private val bodyPositionChecker = BodyPositionChecker()
+    private var voiceFeedbackProvider: VoiceFeedbackProvider? = null
     
     private val options = PoseDetectorOptions.Builder()
         .setDetectorMode(PoseDetectorOptions.STREAM_MODE)
@@ -69,11 +76,17 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
     private var lastCountdownTime = 0L
     private var smileSaidTime = 0L
     private val SMILE_DELAY = 2000L // 2 seconds delay after saying smile
-    private var imageCaptured = false // Flag to prevent multiple captures
+    
+    // Two-stage capture state
+    private var currentStage = PoseStage.FRONT_POSE
+    private var frontPoseImage: Bitmap? = null
+    private var sidePoseImage: Bitmap? = null
+    private var frontImageCaptured = false
+    private var sideImageCaptured = false
 
     // Reference pose
     private val referencePose = ReferencePose(
-        shoulderAngle = 90.0,
+        shoulderAngle = 45.0,
         shoulderAngleTolerance = 15.0,
         elbowAngleLeft = 180.0,
         elbowAngleRight = 180.0,
@@ -84,18 +97,51 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
         hipAngleRight = 180.0,
         hipAngleTolerance = 15.0,
         shoulderLevelDiff = 0.0,
-        shoulderLevelTolerance = 30.0
+        shoulderLevelTolerance = 30.0,
+        legSeparationAngle = 45.0,
+        legSeparationTolerance = 15.0
+    )
+    
+    private val sidePoseReference = SidePoseReference(
+        neckHeadAngle = 180.0,
+        neckHeadTolerance = 15.0,
+        armAngle = 180.0,
+        armTolerance = 20.0,
+        spineVerticalAngle = 0.0,
+        spineTolerance = 15.0,
+        legStraightAngle = 180.0,
+        legTolerance = 15.0,
+        shoulderDepthDiff = 0.0,
+        shoulderDepthTolerance = 30.0  // Shoulders should be vertically aligned (small Y difference)
     )
     
     override fun getName(): String {
         return "CameraView"
     }
+    
+    override fun getCommandsMap(): Map<String, Int> {
+        return mapOf(
+            "navigateToResult" to COMMAND_NAVIGATE_TO_RESULT
+        )
+    }
+    
+    override fun receiveCommand(root: ConstraintLayout, commandId: Int, args: com.facebook.react.bridge.ReadableArray?) {
+        when (commandId) {
+            COMMAND_NAVIGATE_TO_RESULT -> {
+                sendImagesToReactNative()
+            }
+        }
+    }
 
     override fun createViewInstance(reactContext: ThemedReactContext): ConstraintLayout {
+        // Reset detection state to fix re-entry issue
+        resetDetectionState()
+        
         // Initialize TextToSpeech
         textToSpeech = TextToSpeech(reactContext) { status ->
             if (status == TextToSpeech.SUCCESS) {
                 textToSpeech?.language = Locale.US
+                voiceFeedbackProvider = VoiceFeedbackProvider(textToSpeech)
                 Log.d(TAG, "TextToSpeech initialized successfully")
             } else {
                 Log.e(TAG, "TextToSpeech initialization failed")
@@ -188,6 +234,9 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
         }
         Log.d(TAG, "Setting camera type to: $cameraType (lensFacing: $currentLensFacing)")
         
+        // Reset detection state when camera type is set (fixes re-entry detection issue)
+        resetDetectionState()
+        
         val previewView = view.tag as? PreviewView
         val overlayView = view.getTag(R.id.pose_overlay_tag) as? PoseOverlayView
         
@@ -206,11 +255,23 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
     }
 
     private fun startCamera(previewView: PreviewView, overlayView: PoseOverlayView, lensFacing: Int) {
+        Log.d(TAG, "Starting camera with lensFacing: $lensFacing")
+        
+        // Recreate executor if it's been shut down (fixes re-entry detection issue)
+        if (cameraExecutor.isShutdown || cameraExecutor.isTerminated) {
+            Log.d(TAG, "Recreating camera executor (was shutdown)")
+            cameraExecutor = Executors.newSingleThreadExecutor()
+        }
+        
         val cameraProviderFuture = ProcessCameraProvider.getInstance(reactContext)
 
         cameraProviderFuture.addListener({
             try {
                 val cameraProvider = cameraProviderFuture.get()
+                
+                // Unbind all use cases before rebinding
+                cameraProvider.unbindAll()
+                Log.d(TAG, "Unbound all previous use cases")
                 
                 val preview = Preview.Builder()
                     .build()
@@ -240,12 +301,6 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
                     }
 
                     try {
-                        // Skip processing if image already captured
-                        if (imageCaptured) {
-                            synchronized(lock) { isProcessing = false }
-                            return@setAnalyzer
-                        }
-                        
                         val buffer: ByteBuffer = image.planes[0].buffer
                         buffer.rewind()
                         val bitmap = Bitmap.createBitmap(
@@ -271,73 +326,15 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
                         val inputImage = InputImage.fromBitmap(rotatedBitmap, 0)
                         poseDetector.process(inputImage)
                             .addOnSuccessListener { pose ->
-                                // First check: Is a person fully detected?
-                                val personDetected = isPersonFullyDetected(pose)
-                                
-                                if (!personDetected) {
-                                    provideVoiceFeedback("Please stand in front of camera", null, null)
-                                    
-                                    if (!imageCaptured) {
-                                        val activity = reactContext.currentActivity
-                                        activity?.runOnUiThread {
-                                            overlayView.updatePose(null, null, false, 0, false)
-                                            overlayView.updateBitmap(rotatedBitmap)
-                                        }
-                                    }
-                                    
-                                    synchronized(lock) { isProcessing = false }
-                                    return@addOnSuccessListener
-                                }
-                                
-                                // Second check: Is person positioned correctly in box?
-                                val positionCheck = checkBodyPosition(
-                                    pose,
-                                    rotatedBitmap.width,
-                                    rotatedBitmap.height
-                                )
-                                
-                                if (!positionCheck.inBox) {
-                                    provideVoiceFeedback(positionCheck.issues.firstOrNull(), null, positionCheck)
-                                    
-                                    if (!imageCaptured) {
-                                        val activity = reactContext.currentActivity
-                                        activity?.runOnUiThread {
-                                            overlayView.updatePose(pose, null, false, 0, false)
-                                            overlayView.updateBitmap(rotatedBitmap)
-                                        }
-                                    }
-                                    
-                                    synchronized(lock) { isProcessing = false }
-                                    return@addOnSuccessListener
-                                }
-                                
-                                // Third check: Is posture accurate?
-                                val metrics = calculatePostureMetrics(pose)
-                                val accuracy = compareWithReference(metrics, referencePose)
-                                val isPerfectPose = isPoseAccurate(accuracy, positionCheck)
-                                
-                                // Provide posture feedback if not perfect
-                                if (!isPerfectPose) {
-                                    provideVoiceFeedback(null, accuracy, positionCheck)
-                                }
-                                
-                                handlePoseCapture(isPerfectPose)
-
-                                // Skip overlay updates if image was already captured
-                                if (!imageCaptured) {
-                                    val activity = reactContext.currentActivity
-                                    activity?.runOnUiThread {
-                                        overlayView.updatePose(
-                                            pose,
-                                            accuracy,
-                                            isPerfectPose,
-                                            countdownValue,
-                                            isCountingDown
-                                        )
-                                        overlayView.updateBitmap(rotatedBitmap)
+                                val allLandmarks = pose.allPoseLandmarks
+                                if (allLandmarks.isNotEmpty()) {
+                                    if (currentStage == PoseStage.FRONT_POSE) {
+                                        handleFrontPoseDetection(pose, rotatedBitmap, overlayView)
+                                    } else {
+                                        handleSidePoseDetection(pose, rotatedBitmap, overlayView)
                                     }
                                 }
-
+                                
                                 synchronized(lock) {
                                     isProcessing = false
                                 }
@@ -362,8 +359,6 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
                     .requireLensFacing(lensFacing)
                     .build()
 
-                cameraProvider.unbindAll()
-
                 val activity = reactContext.currentActivity
                 if (activity is LifecycleOwner) {
                     Log.d(TAG, "Binding camera to lifecycle")
@@ -374,6 +369,11 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
                         imageAnalysis
                     )
                     Log.d(TAG, "Camera started successfully with pose detection")
+                    
+                    // Send initial status using direct emission
+                    android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                        sendStatusEvent("camera_started", "Camera started and ready for detection")
+                    }, 500)
                 } else {
                     Log.e(TAG, "Activity is not a LifecycleOwner")
                 }
@@ -396,330 +396,302 @@ class CameraViewManager(private val reactContext: ReactApplicationContext) : Sim
         textToSpeech?.shutdown()
         textToSpeech = null
         
+        // Only unbind camera, don't shutdown executor or close detector
+        // This allows the camera to restart when user returns to screen
         val cameraProviderFuture = ProcessCameraProvider.getInstance(reactContext)
         cameraProviderFuture.addListener({
             try {
                 val cameraProvider = cameraProviderFuture.get()
                 cameraProvider.unbindAll()
-                poseDetector.close()
-                cameraExecutor.shutdown()
-                Log.d(TAG, "Camera unbound successfully")
+                Log.d(TAG, "Camera unbound (executor kept alive for re-entry)")
             } catch (e: Exception) {
                 Log.e(TAG, "Error unbinding camera", e)
                 e.printStackTrace()
             }
         }, ContextCompat.getMainExecutor(reactContext))
     }
-
-    private fun calculatePostureMetrics(pose: Pose): PostureMetrics {
-        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
-        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
-        val leftElbow = pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW)
-        val rightElbow = pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW)
-        val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)
-        val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)
-        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)
-        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)
-        val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)
-        val rightKnee = pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE)
-
-        val shoulderAngleLeft = if (leftShoulder != null && leftElbow != null && leftHip != null) {
-            calculateAngle(leftHip, leftShoulder, leftElbow)
-        } else 0.0
-
-        val shoulderAngleRight = if (rightShoulder != null && rightElbow != null && rightHip != null) {
-            calculateAngle(rightHip, rightShoulder, rightElbow)
-        } else 0.0
-
-        val elbowAngleLeft = if (leftShoulder != null && leftElbow != null && leftWrist != null) {
-            calculateAngle(leftShoulder, leftElbow, leftWrist)
-        } else 0.0
-
-        val elbowAngleRight = if (rightShoulder != null && rightElbow != null && rightWrist != null) {
-            calculateAngle(rightShoulder, rightElbow, rightWrist)
-        } else 0.0
-
-        val spineAngle = if (leftShoulder != null && rightShoulder != null && leftHip != null && rightHip != null) {
-            val shoulderMidX = (leftShoulder.position.x + rightShoulder.position.x) / 2
-            val shoulderMidY = (leftShoulder.position.y + rightShoulder.position.y) / 2
-            val hipMidX = (leftHip.position.x + rightHip.position.x) / 2
-            val hipMidY = (leftHip.position.y + rightHip.position.y) / 2
-
-            val angle = atan2((shoulderMidX - hipMidX).toDouble(), (hipMidY - shoulderMidY).toDouble())
-            abs(Math.toDegrees(angle))
-        } else 0.0
-
-        val hipAngleLeft = if (leftShoulder != null && leftHip != null && leftKnee != null) {
-            calculateAngle(leftShoulder, leftHip, leftKnee)
-        } else 0.0
-
-        val hipAngleRight = if (rightShoulder != null && rightHip != null && rightKnee != null) {
-            calculateAngle(rightShoulder, rightHip, rightKnee)
-        } else 0.0
-
-        val shoulderLevelDiff = if (leftShoulder != null && rightShoulder != null) {
-            abs(leftShoulder.position.y - rightShoulder.position.y)
-        } else 0f
-
-        return PostureMetrics(
-            shoulderAngleLeft = shoulderAngleLeft,
-            shoulderAngleRight = shoulderAngleRight,
-            elbowAngleLeft = elbowAngleLeft,
-            elbowAngleRight = elbowAngleRight,
-            spineAngle = spineAngle,
-            hipAngleLeft = hipAngleLeft,
-            hipAngleRight = hipAngleRight,
-            shoulderLevelDiff = shoulderLevelDiff.toDouble()
-        )
-    }
-
-    private fun calculateAngle(
-        firstPoint: PoseLandmark,
-        midPoint: PoseLandmark,
-        lastPoint: PoseLandmark
-    ): Double {
-        val result = Math.toDegrees(
-            atan2(
-                (lastPoint.position.y - midPoint.position.y).toDouble(),
-                (lastPoint.position.x - midPoint.position.x).toDouble()
-            ) - atan2(
-                (firstPoint.position.y - midPoint.position.y).toDouble(),
-                (firstPoint.position.x - midPoint.position.x).toDouble()
-            )
-        )
-        return abs(if (result > 180) 360 - result else result)
-    }
-
-    private fun compareWithReference(current: PostureMetrics, reference: ReferencePose): PostureAccuracy {
-        val shoulderDiffL = abs(current.shoulderAngleLeft - reference.shoulderAngle)
-        val shoulderDiffR = abs(current.shoulderAngleRight - reference.shoulderAngle)
-        val elbowDiffL = abs(current.elbowAngleLeft - reference.elbowAngleLeft)
-        val elbowDiffR = abs(current.elbowAngleRight - reference.elbowAngleRight)
-        val spineDiff = current.spineAngle
-        val hipDiffL = abs(current.hipAngleLeft - reference.hipAngleLeft)
-        val hipDiffR = abs(current.hipAngleRight - reference.hipAngleRight)
-
-        return PostureAccuracy(
-            shoulderAccurateLeft = shoulderDiffL <= reference.shoulderAngleTolerance,
-            shoulderAccurateRight = shoulderDiffR <= reference.shoulderAngleTolerance,
-            elbowAccurateLeft = elbowDiffL <= reference.elbowAngleTolerance,
-            elbowAccurateRight = elbowDiffR <= reference.elbowAngleTolerance,
-            spineAccurate = spineDiff <= reference.spineAngleTolerance,
-            hipAccurateLeft = hipDiffL <= reference.hipAngleTolerance,
-            hipAccurateRight = hipDiffR <= reference.hipAngleTolerance,
-            shoulderLevelAccurate = current.shoulderLevelDiff <= reference.shoulderLevelTolerance,
-            shoulderDiffLeft = shoulderDiffL,
-            shoulderDiffRight = shoulderDiffR,
-            elbowDiffLeft = elbowDiffL,
-            elbowDiffRight = elbowDiffR,
-            spineDiff = spineDiff,
-            hipDiffLeft = hipDiffL,
-            hipDiffRight = hipDiffR
-        )
-    }
-
-    private fun isPersonFullyDetected(pose: Pose): Boolean {
-        // Check if all critical landmarks are detected
-        val criticalLandmarks = listOf(
-            PoseLandmark.NOSE,
-            PoseLandmark.LEFT_SHOULDER,
-            PoseLandmark.RIGHT_SHOULDER,
-            PoseLandmark.LEFT_ELBOW,
-            PoseLandmark.RIGHT_ELBOW,
-            PoseLandmark.LEFT_WRIST,
-            PoseLandmark.RIGHT_WRIST,
-            PoseLandmark.LEFT_HIP,
-            PoseLandmark.RIGHT_HIP,
-            PoseLandmark.LEFT_KNEE,
-            PoseLandmark.RIGHT_KNEE
-        )
+    
+    private fun handleFrontPoseDetection(pose: Pose, bitmap: Bitmap, overlayView: PoseOverlayView) {
+        if (frontImageCaptured) return
         
-        return criticalLandmarks.all { landmarkType ->
-            pose.getPoseLandmark(landmarkType) != null
+        val personDetected = poseValidator.isPersonFullyDetected(pose)
+        if (!personDetected) {
+            voiceFeedbackProvider?.provideFrontPoseFeedback("Please stand in front of camera", null, null)
+            val activity = reactContext.currentActivity
+            activity?.runOnUiThread {
+                overlayView.updatePose(null, null, false, 0, false, currentStage)
+                overlayView.updateBitmap(bitmap)
+            }
+            return
         }
+        
+        val positionCheck = bodyPositionChecker.checkBodyPosition(pose, bitmap.width, bitmap.height)
+        if (!positionCheck.inBox) {
+            voiceFeedbackProvider?.provideFrontPoseFeedback(positionCheck.issues.firstOrNull(), null, positionCheck)
+            val activity = reactContext.currentActivity
+            activity?.runOnUiThread {
+                overlayView.updatePose(pose, null, false, 0, false, currentStage)
+                overlayView.updateBitmap(bitmap)
+            }
+            return
+        }
+        
+        val metrics = poseValidator.calculatePostureMetrics(pose)
+        val accuracy = poseValidator.compareWithReference(metrics, referencePose)
+        val isPerfectPose = poseValidator.isPoseAccurate(accuracy, positionCheck)
+        
+        if (!isPerfectPose) {
+            voiceFeedbackProvider?.provideFrontPoseFeedback(null, accuracy, positionCheck)
+        }
+        
+        handleFrontPoseCapture(isPerfectPose, bitmap, overlayView, pose, accuracy)
     }
     
-    private fun provideVoiceFeedback(
-        customMessage: String?,
-        accuracy: PostureAccuracy?,
-        positionCheck: PositionCheck?
-    ) {
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastSpokenTime < SPEECH_COOLDOWN) return
-
-        val feedback = customMessage ?: run {
-            // Check position first
-            if (positionCheck != null && !positionCheck.inBox && positionCheck.issues.isNotEmpty()) {
-                positionCheck.issues.first()
-            } else if (accuracy != null) {
-                // Check posture
-                when {
-                    !accuracy.shoulderAccurateLeft && accuracy.shoulderDiffLeft > 20 ->
-                        "Raise your right arm higher"
-                    !accuracy.shoulderAccurateRight && accuracy.shoulderDiffRight > 20 ->
-                        "Raise your left arm higher"
-                    !accuracy.elbowAccurateLeft ->
-                        "Straighten your right arm"
-                    !accuracy.elbowAccurateRight ->
-                        "Straighten your left arm"
-                    !accuracy.spineAccurate ->
-                        "Stand up straight"
-                    !accuracy.shoulderLevelAccurate ->
-                        "Level your shoulders"
-                    !accuracy.hipAccurateLeft || !accuracy.hipAccurateRight ->
-                        "Keep your legs straight"
-                    else -> null
-                }
-            } else {
-                null
-            }
-        }
-
-        feedback?.let {
-            textToSpeech?.speak(it, TextToSpeech.QUEUE_FLUSH, null, null)
-            lastSpokenTime = currentTime
-            Log.d(TAG, "Voice feedback: $it")
-        }
-    }
-
-    private fun checkBodyPosition(pose: Pose, width: Int, height: Int): PositionCheck {
-        val issues = mutableListOf<String>()
-        val targetBox = TargetBox(0.05f, 0.05f, 0.95f, 0.95f)
-
-        // Check critical body landmarks to ensure entire body is in frame, especially feet
-        val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)
-        val rightAnkle = pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE)
-        val leftHeel = pose.getPoseLandmark(PoseLandmark.LEFT_HEEL)
-        val rightHeel = pose.getPoseLandmark(PoseLandmark.RIGHT_HEEL)
-        val leftFootIndex = pose.getPoseLandmark(PoseLandmark.LEFT_FOOT_INDEX)
-        val rightFootIndex = pose.getPoseLandmark(PoseLandmark.RIGHT_FOOT_INDEX)
-        val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)
-        val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)
-        val nose = pose.getPoseLandmark(PoseLandmark.NOSE)
-        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)
-        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)
-
-        // Include all foot landmarks to ensure complete foot is in box
-        val landmarks = listOfNotNull(
-            leftAnkle, rightAnkle, 
-            leftHeel, rightHeel, 
-            leftFootIndex, rightFootIndex,
-            leftWrist, rightWrist, 
-            nose, leftShoulder, rightShoulder
-        )
+    private fun handleSidePoseDetection(pose: Pose, bitmap: Bitmap, overlayView: PoseOverlayView) {
+        if (sideImageCaptured) return
         
-        if (landmarks.isEmpty()) {
-            return PositionCheck(false, listOf("Stand in front of camera"))
+        val personDetected = poseValidator.isPersonFullyDetected(pose)
+        if (!personDetected) {
+            voiceFeedbackProvider?.speak("Please stand in front of camera")
+            val activity = reactContext.currentActivity
+            activity?.runOnUiThread {
+                overlayView.updatePose(null, null, false, 0, false, currentStage)
+                overlayView.updateBitmap(bitmap)
+            }
+            return
         }
-
-        // No positional checks - accept all positions
-        return PositionCheck(true, issues)
+        
+        val positionCheck = bodyPositionChecker.checkBodyPosition(pose, bitmap.width, bitmap.height)
+        val sideMetrics = sidePoseValidator.calculateSidePoseMetrics(pose)
+        val sideAccuracy = sidePoseValidator.compareWithSideReference(sideMetrics, sidePoseReference)
+        val isPerfectSidePose = sidePoseValidator.isSidePoseAccurate(sideAccuracy, positionCheck)
+        
+        if (!isPerfectSidePose) {
+            voiceFeedbackProvider?.provideSidePoseFeedback(sideAccuracy, positionCheck)
+        }
+        
+        handleSidePoseCapture(isPerfectSidePose, bitmap, overlayView, pose, sideAccuracy)
     }
-
-    private fun isPoseAccurate(accuracy: PostureAccuracy, positionCheck: PositionCheck): Boolean {
-        return positionCheck.inBox &&
-                accuracy.shoulderAccurateLeft &&
-                accuracy.shoulderAccurateRight &&
-                accuracy.elbowAccurateLeft &&
-                accuracy.elbowAccurateRight &&
-                accuracy.spineAccurate &&
-                accuracy.hipAccurateLeft &&
-                accuracy.hipAccurateRight &&
-                accuracy.shoulderLevelAccurate
-    }
-
-    private fun handlePoseCapture(isPerfectPose: Boolean) {
+    
+    private fun handleFrontPoseCapture(isPerfectPose: Boolean, bitmap: Bitmap, overlayView: PoseOverlayView, pose: Pose, accuracy: PostureAccuracy) {
         if (isPerfectPose) {
             consecutiveGoodFrames++
-
             if (consecutiveGoodFrames >= REQUIRED_GOOD_FRAMES && !isCountingDown) {
                 isCountingDown = true
                 countdownValue = 5
                 lastCountdownTime = System.currentTimeMillis()
                 smileSaidTime = 0L
                 textToSpeech?.speak("Perfect posture! Hold still", TextToSpeech.QUEUE_FLUSH, null, null)
-                Log.d(TAG, "Perfect posture detected! Starting countdown")
+                
+                // Emit ready to capture status
+                sendStatusEvent("ready_to_capture", "Front pose ready, countdown started")
             } else if (isCountingDown) {
                 val currentTime = System.currentTimeMillis()
-                
-                // Check if we said "smile" and are waiting
                 if (smileSaidTime > 0) {
-                    if (currentTime - smileSaidTime >= SMILE_DELAY && !imageCaptured) {
-                        // Capture the clean image
-                        latestCleanBitmap?.let { bitmap ->
-                            captureAndSaveImage(bitmap)
-                            imageCaptured = true // Set flag to stop further captures
-                            
-                            // Clear the overlay to remove pose lines and box
-                            val activity = reactContext.currentActivity
-                            activity?.runOnUiThread {
-                                val constraintLayout = currentView
-                                val overlayView = constraintLayout?.getTag(R.id.pose_overlay_tag) as? PoseOverlayView
-                                overlayView?.updatePose(null, null, false, 0, false)
-                                overlayView?.updateBitmap(null)
-                            }
-                        }
+                    if (currentTime - smileSaidTime >= SMILE_DELAY && !frontImageCaptured) {
+                        frontPoseImage = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        frontImageCaptured = true
                         isCountingDown = false
                         consecutiveGoodFrames = 0
                         countdownValue = 5
                         smileSaidTime = 0L
+                        
+                        // Emit front pose captured status
+                        sendStatusEvent("front_pose_captured", "Front pose captured successfully")
+                        
+                        // Transition to side pose stage
+                        currentStage = PoseStage.SIDE_POSE
+                        
+                        // Give clear instruction to turn sideways
+                        val activity = reactContext.currentActivity
+                        activity?.runOnUiThread {
+                            overlayView.updatePose(null, null, false, 0, false, currentStage)
+                        }
+                        
+                        // Use handler to delay voice instruction so user hears it clearly
+                        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                            textToSpeech?.speak("Great! Now turn sideways. Face left and show your side to the camera", TextToSpeech.QUEUE_FLUSH, null, null)
+                        }, 1500)
                     }
                 } else if (currentTime - lastCountdownTime >= 1000) {
                     countdownValue--
                     lastCountdownTime = currentTime
-
                     if (countdownValue > 0) {
                         textToSpeech?.speak(countdownValue.toString(), TextToSpeech.QUEUE_FLUSH, null, null)
                     } else {
-                        // Say "Smile!" and start the 2-second timer
                         textToSpeech?.speak("Smile!", TextToSpeech.QUEUE_FLUSH, null, null)
                         smileSaidTime = currentTime
-                        Log.d(TAG, "Smile said, waiting 2 seconds before capture")
                     }
                 }
             }
         } else {
             if (isCountingDown) {
                 textToSpeech?.speak("Hold your position", TextToSpeech.QUEUE_FLUSH, null, null)
-                Log.d(TAG, "Pose lost during countdown - resetting")
                 isCountingDown = false
                 countdownValue = 5
                 smileSaidTime = 0L
             }
             consecutiveGoodFrames = 0
         }
+        
+        val activity = reactContext.currentActivity
+        activity?.runOnUiThread {
+            overlayView.updatePose(pose, accuracy, isPerfectPose, countdownValue, isCountingDown, currentStage)
+            overlayView.updateBitmap(bitmap)
+        }
     }
     
-    private fun captureAndSaveImage(bitmap: Bitmap) {
-        try {
-            val fileName = "pose_${System.currentTimeMillis()}.jpg"
-            val contentValues = android.content.ContentValues().apply {
-                put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, fileName)
-                put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-                put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PoseDetection")
-            }
-
-            val uri = reactContext.contentResolver.insert(
-                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                contentValues
-            )
-
-            uri?.let {
-                reactContext.contentResolver.openOutputStream(it)?.use { outputStream ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, outputStream)
+    private fun handleSidePoseCapture(isPerfectPose: Boolean, bitmap: Bitmap, overlayView: PoseOverlayView, pose: Pose, accuracy: SidePoseAccuracy) {
+        if (isPerfectPose) {
+            consecutiveGoodFrames++
+            if (consecutiveGoodFrames >= REQUIRED_GOOD_FRAMES && !isCountingDown) {
+                isCountingDown = true
+                countdownValue = 5
+                lastCountdownTime = System.currentTimeMillis()
+                smileSaidTime = 0L
+                textToSpeech?.speak("Perfect! Hold still", TextToSpeech.QUEUE_FLUSH, null, null)
+                
+                // Emit ready to capture status for side pose
+                sendStatusEvent("ready_to_capture_side", "Side pose ready, countdown started")
+            } else if (isCountingDown) {
+                val currentTime = System.currentTimeMillis()
+                if (smileSaidTime > 0) {
+                    if (currentTime - smileSaidTime >= SMILE_DELAY && !sideImageCaptured) {
+                        sidePoseImage = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                        sideImageCaptured = true
+                        isCountingDown = false
+                        consecutiveGoodFrames = 0
+                        
+                        Log.d(TAG, "Side pose captured! Front image exists: ${frontPoseImage != null}, Side image exists: ${sidePoseImage != null}")
+                        textToSpeech?.speak("Perfect! Both poses captured!", TextToSpeech.QUEUE_FLUSH, null, null)
+                        
+                        // Emit both poses captured status
+                        sendStatusEvent("both_poses_captured", "Both front and side poses captured successfully")
+                        
+                        // Send both images to React Native
+                        Log.d(TAG, "About to call sendImagesToReactNative()")
+                        sendImagesToReactNative()
+                        
+                        val activity = reactContext.currentActivity
+                        activity?.runOnUiThread {
+                            overlayView.updatePose(null, null, false, 0, false, currentStage)
+                            overlayView.updateBitmap(null)
+                        }
+                    }
+                } else if (currentTime - lastCountdownTime >= 1000) {
+                    countdownValue--
+                    lastCountdownTime = currentTime
+                    if (countdownValue > 0) {
+                        textToSpeech?.speak(countdownValue.toString(), TextToSpeech.QUEUE_FLUSH, null, null)
+                    } else {
+                        textToSpeech?.speak("Smile!", TextToSpeech.QUEUE_FLUSH, null, null)
+                        smileSaidTime = currentTime
+                    }
                 }
+            }
+        } else {
+            if (isCountingDown) {
+                textToSpeech?.speak("Hold your position", TextToSpeech.QUEUE_FLUSH, null, null)
+                isCountingDown = false
+                countdownValue = 5
+                smileSaidTime = 0L
+            }
+            consecutiveGoodFrames = 0
+        }
+        
+        val activity = reactContext.currentActivity
+        activity?.runOnUiThread {
+            overlayView.updateSidePose(pose, accuracy, isPerfectPose, countdownValue, isCountingDown, currentStage)
+            overlayView.updateBitmap(bitmap)
+        }
+    }
+    
+    private fun sendImagesToReactNative() {
+        Log.d(TAG, "sendImagesToReactNative called")
+        try {
+            Log.d(TAG, "Front image null? ${frontPoseImage == null}, Side image null? ${sidePoseImage == null}")
+            
+            val frontUri = saveBitmapToCache(frontPoseImage, "front_pose.jpg")
+            Log.d(TAG, "Front URI: $frontUri")
+            
+            val sideUri = saveBitmapToCache(sidePoseImage, "side_pose.jpg")
+            Log.d(TAG, "Side URI: $sideUri")
+            
+            if (frontUri != null && sideUri != null) {
+                Log.d(TAG, "Both URIs are valid, sending event directly")
+                // Send event directly from CameraViewManager
+                val params = com.facebook.react.bridge.Arguments.createMap()
+                params.putString("frontUri", frontUri)
+                params.putString("sideUri", sideUri)
                 
-                Log.d(TAG, "Image saved successfully: $uri")
-                
-                // Send event to React Native with the image URI
-                val imageCaptureModule = reactContext.getNativeModule(ImageCaptureModule::class.java)
-                imageCaptureModule?.sendCaptureEvent(uri.toString())
-                
-                textToSpeech?.speak("Photo captured successfully!", TextToSpeech.QUEUE_FLUSH, null, null)
+                reactContext
+                    .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                    .emit("onBothImagesCaptured", params)
+                    
+                Log.d(TAG, "Both images event emitted successfully - Front: $frontUri, Side: $sideUri")
+            } else {
+                Log.e(TAG, "Failed to save images - Front: $frontUri, Side: $sideUri")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error saving image", e)
-            textToSpeech?.speak("Failed to save photo", TextToSpeech.QUEUE_FLUSH, null, null)
+            Log.e(TAG, "Error sending images to React Native", e)
+            e.printStackTrace()
+        }
+    }
+    
+    private fun saveBitmapToCache(bitmap: Bitmap?, filename: String): String? {
+        return try {
+            bitmap?.let {
+                val cacheDir = reactContext.cacheDir
+                val file = java.io.File(cacheDir, filename)
+                java.io.FileOutputStream(file).use { out ->
+                    bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+                }
+                "file://${file.absolutePath}"
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving bitmap to cache: $filename", e)
+            null
+        }
+    }
+    
+    private fun resetDetectionState() {
+        Log.d(TAG, "Resetting detection state")
+        isProcessing = false
+        isCountingDown = false
+        countdownValue = 5
+        consecutiveGoodFrames = 0
+        currentStage = PoseStage.FRONT_POSE
+        frontPoseImage = null
+        sidePoseImage = null
+        frontImageCaptured = false
+        sideImageCaptured = false
+        shouldCaptureClean = false
+        lastCountdownTime = 0L
+        smileSaidTime = 0L
+        lastSpokenTime = 0L
+    }
+    
+    private fun sendStatusEvent(status: String, message: String = "") {
+        try {
+            val params = com.facebook.react.bridge.Arguments.createMap()
+            params.putString("status", status)
+            params.putString("message", message)
+            Log.d(TAG, "Sending status event - Status: $status, Message: $message")
+            reactContext
+                .getJSModule(com.facebook.react.modules.core.DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
+                .emit("onCaptureStatus", params)
+            Log.d(TAG, "Status event emitted successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending status event", e)
+        }
+    }
+    
+    private fun getImageCaptureModule(): ImageCaptureModule? {
+        return try {
+            reactContext.getNativeModule(ImageCaptureModule::class.java)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting ImageCaptureModule", e)
+            null
         }
     }
 }
