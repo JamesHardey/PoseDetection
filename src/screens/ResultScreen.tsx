@@ -9,10 +9,15 @@ import {
   ActivityIndicator,
   Platform,
   ScrollView,
+  Modal,
+  Alert,
+  PermissionsAndroid,
 } from 'react-native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { RouteProp } from '@react-navigation/native';
 import { RootStackParamList } from '../../App';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import RNFS from 'react-native-fs';
 
 type ResultScreenNavigationProp = NativeStackNavigationProp<
   RootStackParamList,
@@ -26,12 +31,22 @@ interface Props {
   route: ResultScreenRouteProp;
 }
 
+interface SavedPose {
+  id: string;
+  frontUri: string;
+  sideUri: string;
+  timestamp: number;
+  date: string;
+}
+
 const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
   const { imageUri, sideImageUri } = route.params;
   const [frontImageError, setFrontImageError] = useState(false);
   const [sideImageError, setSideImageError] = useState(false);
   const [frontLoading, setFrontLoading] = useState(true);
   const [sideLoading, setSideLoading] = useState(!!sideImageUri);
+  const [fullScreenImage, setFullScreenImage] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   // For Android content URIs, we need to use them directly
   const displayFrontUri = Platform.OS === 'android' && imageUri.startsWith('content://')
@@ -55,12 +70,105 @@ const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
     console.log('Result screen - Display Side URI:', displaySideUri);
   }, [imageUri, sideImageUri, displayFrontUri, displaySideUri]);
 
+  const requestStoragePermission = async (): Promise<boolean> => {
+    if (Platform.OS !== 'android') return true;
+
+    try {
+      if (Platform.Version >= 33) {
+        // Android 13+, no permission needed for app-specific storage
+        return true;
+      }
+
+      const granted = await PermissionsAndroid.request(
+        PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE,
+        {
+          title: 'Storage Permission',
+          message: 'This app needs access to storage to save your poses',
+          buttonNeutral: 'Ask Me Later',
+          buttonNegative: 'Cancel',
+          buttonPositive: 'OK',
+        }
+      );
+      return granted === PermissionsAndroid.RESULTS.GRANTED;
+    } catch (err) {
+      console.error('Permission error:', err);
+      return false;
+    }
+  };
+
+  const savePose = async () => {
+    try {
+      setIsSaving(true);
+
+      const hasPermission = await requestStoragePermission();
+      if (!hasPermission) {
+        Alert.alert('Permission Denied', 'Storage permission is required to save poses');
+        setIsSaving(false);
+        return;
+      }
+
+      // Create permanent storage directory
+      const poseDir = `${RNFS.DocumentDirectoryPath}/poses`;
+      await RNFS.mkdir(poseDir);
+
+      // Generate unique ID
+      const id = Date.now().toString();
+      const frontFileName = `front_${id}.jpg`;
+      const sideFileName = `side_${id}.jpg`;
+      const frontDestPath = `${poseDir}/${frontFileName}`;
+      const sideDestPath = `${poseDir}/${sideFileName}`;
+
+      // Copy from cache to permanent storage
+      const frontSource = imageUri.replace('file://', '');
+      const sideSource = sideImageUri?.replace('file://', '') || '';
+
+      await RNFS.copyFile(frontSource, frontDestPath);
+      if (sideSource) {
+        await RNFS.copyFile(sideSource, sideDestPath);
+      }
+
+      // Save to history
+      const savedPose: SavedPose = {
+        id,
+        frontUri: `file://${frontDestPath}`,
+        sideUri: `file://${sideDestPath}`,
+        timestamp: Date.now(),
+        date: new Date().toLocaleDateString(),
+      };
+
+      // Get existing history
+      const historyJson = await AsyncStorage.getItem('poseHistory');
+      const history: SavedPose[] = historyJson ? JSON.parse(historyJson) : [];
+
+      // Add new pose to history
+      history.unshift(savedPose);
+
+      // Keep only last 50 poses
+      const trimmedHistory = history.slice(0, 50);
+
+      // Save updated history
+      await AsyncStorage.setItem('poseHistory', JSON.stringify(trimmedHistory));
+
+      Alert.alert('Success', 'Pose saved successfully!', [
+        { text: 'OK', onPress: () => setIsSaving(false) }
+      ]);
+    } catch (error) {
+      console.error('Error saving pose:', error);
+      Alert.alert('Error', 'Failed to save pose. Please try again.');
+      setIsSaving(false);
+    }
+  };
+
   const handleRetake = () => {
     navigation.navigate('Camera');
   };
 
   const handleDone = () => {
     navigation.navigate('Intro');
+  };
+
+  const handleViewHistory = () => {
+    navigation.navigate('History' as any);
   };
 
   return (
@@ -71,7 +179,11 @@ const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
         {/* Both Images Side by Side */}
         <View style={styles.imagesRow}>
           {/* Front Pose Image */}
-          <View style={styles.imageSection}>
+          <TouchableOpacity 
+            style={styles.imageSection}
+            onPress={() => setFullScreenImage(displayFrontUri)}
+            activeOpacity={0.8}
+          >
             <Text style={styles.imageLabel}>Front Pose</Text>
             <View style={styles.imageContainer}>
               {frontLoading && (
@@ -101,11 +213,16 @@ const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
                 />
               )}
             </View>
-          </View>
+            <Text style={styles.tapHint}>Tap to view fullscreen</Text>
+          </TouchableOpacity>
 
           {/* Side Pose Image */}
           {displaySideUri && (
-            <View style={styles.imageSection}>
+            <TouchableOpacity 
+              style={styles.imageSection}
+              onPress={() => setFullScreenImage(displaySideUri)}
+              activeOpacity={0.8}
+            >
               <Text style={styles.imageLabel}>Side Pose</Text>
               <View style={styles.imageContainer}>
                 {sideLoading && (
@@ -135,11 +252,28 @@ const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
                   />
                 )}
               </View>
-            </View>
+              <Text style={styles.tapHint}>Tap to view fullscreen</Text>
+            </TouchableOpacity>
           )}
         </View>
 
         <View style={styles.buttonContainer}>
+          <TouchableOpacity 
+            style={[styles.saveButton, isSaving && styles.buttonDisabled]} 
+            onPress={savePose}
+            disabled={isSaving}
+          >
+            {isSaving ? (
+              <ActivityIndicator color="#fff" />
+            ) : (
+              <Text style={styles.saveButtonText}>💾 Save Pose</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity style={styles.historyButton} onPress={handleViewHistory}>
+            <Text style={styles.historyButtonText}>📁 View History</Text>
+          </TouchableOpacity>
+
           <TouchableOpacity style={styles.retakeButton} onPress={handleRetake}>
             <Text style={styles.retakeButtonText}>📷 Retake Photos</Text>
           </TouchableOpacity>
@@ -149,6 +283,31 @@ const ResultScreen: React.FC<Props> = ({ navigation, route }) => {
           </TouchableOpacity>
         </View>
       </ScrollView>
+
+      {/* Full Screen Image Modal */}
+      <Modal
+        visible={fullScreenImage !== null}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setFullScreenImage(null)}
+      >
+        <View style={styles.fullScreenContainer}>
+          <TouchableOpacity 
+            style={styles.backButton}
+            onPress={() => setFullScreenImage(null)}
+          >
+            <Text style={styles.backButtonText}>← Back</Text>
+          </TouchableOpacity>
+          
+          {fullScreenImage && (
+            <Image
+              source={{ uri: fullScreenImage }}
+              style={styles.fullScreenImage}
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 };
@@ -197,9 +356,37 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  tapHint: {
+    fontSize: 12,
+    color: '#888',
+    textAlign: 'center',
+    marginTop: 6,
+  },
   buttonContainer: {
     gap: 12,
     marginTop: 12,
+  },
+  saveButton: {
+    backgroundColor: '#4CAF50',
+    padding: 18,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  saveButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  historyButton: {
+    backgroundColor: '#FF9800',
+    padding: 18,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  historyButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
   },
   retakeButton: {
     backgroundColor: '#333',
@@ -223,15 +410,13 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
   },
+  buttonDisabled: {
+    opacity: 0.5,
+  },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-  },
-  loadingText: {
-    color: '#fff',
-    fontSize: 16,
-    marginTop: 12,
   },
   errorContainer: {
     flex: 1,
@@ -245,10 +430,30 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     textAlign: 'center',
   },
-  errorSubtext: {
-    color: '#999',
-    fontSize: 12,
-    textAlign: 'center',
+  fullScreenContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  backButton: {
+    position: 'absolute',
+    top: 50,
+    left: 20,
+    zIndex: 10,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 25,
+  },
+  backButtonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  fullScreenImage: {
+    width: '100%',
+    height: '100%',
   },
 });
 

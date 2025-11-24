@@ -17,11 +17,13 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import IntroScreen from './src/screens/IntroScreen';
 import CameraScreen from './src/screens/CameraScreen';
 import ResultScreen from './src/screens/ResultScreen';
+import HistoryScreen from './src/screens/HistoryScreen';
 
 export type RootStackParamList = {
   Intro: undefined;
   Camera: undefined;
   Result: { imageUri: string; sideImageUri?: string };
+  History: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -95,6 +97,11 @@ function App() {
         <Stack.Screen
           name="Result"
           component={ResultScreen}
+          options={{ headerShown: false }}
+        />
+        <Stack.Screen
+          name="History"
+          component={HistoryScreen}
           options={{ headerShown: false }}
         />
       </Stack.Navigator>

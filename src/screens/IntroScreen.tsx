@@ -78,6 +78,11 @@ const IntroScreen: React.FC<Props> = ({ navigation }) => {
       requestPermission();
     }
   };
+
+  const handleViewHistory = () => {
+    navigation.navigate('History');
+  };
+
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.content}>
@@ -121,6 +126,12 @@ const IntroScreen: React.FC<Props> = ({ navigation }) => {
           <Text style={styles.buttonText}>
             {permissionGranted ? 'Start Detection' : 'Grant Camera Permission'}
           </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.historyButton}
+          onPress={handleViewHistory}>
+          <Text style={styles.historyButtonText}>📁 View Saved Poses</Text>
         </TouchableOpacity>
 
         <Text style={styles.footer}>
@@ -193,13 +204,25 @@ const styles = StyleSheet.create({
     padding: 18,
     borderRadius: 12,
     alignItems: 'center',
-    marginBottom: 16,
+    marginBottom: 12,
   },
   buttonDisabled: {
     backgroundColor: '#333',
     opacity: 0.5,
   },
   buttonText: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '600',
+  },
+  historyButton: {
+    backgroundColor: '#FF9800',
+    padding: 18,
+    borderRadius: 12,
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  historyButtonText: {
     color: '#fff',
     fontSize: 18,
     fontWeight: '600',
