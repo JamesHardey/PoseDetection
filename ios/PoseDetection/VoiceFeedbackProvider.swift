@@ -14,16 +14,23 @@ class VoiceFeedbackProvider {
             return
         }
         
-        synthesizer.stopSpeaking(at: .immediate)
-        
-        let utterance = AVSpeechUtterance(string: message)
-        utterance.rate = 0.5
-        utterance.volume = 1.0
-        
-        synthesizer.speak(utterance)
-        
-        lastSpokenMessage = message
-        lastSpeakTime = currentTime
+        // Ensure on main thread for speech
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.synthesizer.stopSpeaking(at: .immediate)
+            
+            let utterance = AVSpeechUtterance(string: message)
+            utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
+            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+            utterance.pitchMultiplier = 1.0
+            utterance.volume = 1.0
+            
+            self.synthesizer.speak(utterance)
+            
+            self.lastSpokenMessage = message
+            self.lastSpeakTime = currentTime
+        }
     }
     
     func stop() {

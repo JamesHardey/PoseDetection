@@ -103,16 +103,17 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         captureSession = AVCaptureSession()
         captureSession?.sessionPreset = .high
         
-        guard let backCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
-            print("Unable to access back camera")
+        // Use front camera by default
+        guard let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) else {
+            print("Unable to access front camera")
             sendStatusEvent(status: "error", message: "Camera not available")
             return
         }
         
-        currentCamera = backCamera
+        currentCamera = frontCamera
         
         do {
-            let input = try AVCaptureDeviceInput(device: backCamera)
+            let input = try AVCaptureDeviceInput(device: frontCamera)
             
             if captureSession?.canAddInput(input) == true {
                 captureSession?.addInput(input)
