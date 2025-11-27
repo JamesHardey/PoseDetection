@@ -45,33 +45,37 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const checkPermission = async () => {
     try {
-      if (Platform.OS !== 'android') {
-        setError('CameraX is only available on Android');
-        setIsChecking(false);
-        return;
-      }
-
-      // Quick permission check first
-      const granted = await CameraXModule.checkCameraPermission();
-      
-      if (granted) {
-        // Permission already granted, start camera immediately
+      // iOS handles permissions natively, just set to true
+      if (Platform.OS === 'ios') {
         setHasPermission(true);
         setIsChecking(false);
         return;
       }
 
-      // Check if camera is available
-      const hasCamera = await CameraXModule.isCameraAvailable();
-      if (!hasCamera) {
-        setError('No camera available on this device');
+      // Android permission checks
+      if (Platform.OS === 'android') {
+        // Quick permission check first
+        const granted = await CameraXModule.checkCameraPermission();
+        
+        if (granted) {
+          // Permission already granted, start camera immediately
+          setHasPermission(true);
+          setIsChecking(false);
+          return;
+        }
+
+        // Check if camera is available
+        const hasCamera = await CameraXModule.isCameraAvailable();
+        if (!hasCamera) {
+          setError('No camera available on this device');
+          setIsChecking(false);
+          return;
+        }
+        
+        setHasPermission(false);
+        setError('Camera permission denied. Please grant permission in settings.');
         setIsChecking(false);
-        return;
       }
-      
-      setHasPermission(false);
-      setError('Camera permission denied. Please grant permission in settings.');
-      setIsChecking(false);
     } catch (error) {
       console.error('Error checking camera permission:', error);
       setError(`Error: ${error}`);
@@ -81,22 +85,32 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
   const requestPermission = async () => {
     try {
-      const result = await PermissionsAndroid.request(
-        PermissionsAndroid.PERMISSIONS.CAMERA,
-        {
-          title: 'Camera Permission',
-          message: 'This app needs access to your camera for pose detection',
-          buttonNeutral: 'Ask Me Later',
-          buttonNegative: 'Cancel',
-          buttonPositive: 'OK',
-        }
-      );
-      
-      if (result === PermissionsAndroid.RESULTS.GRANTED) {
+      if (Platform.OS === 'ios') {
+        // iOS permissions are handled natively through Info.plist
         setHasPermission(true);
         setError('');
-      } else {
-        setError('Camera permission denied');
+        return;
+      }
+
+      // Android permission request
+      if (Platform.OS === 'android') {
+        const result = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+          {
+            title: 'Camera Permission',
+            message: 'This app needs access to your camera for pose detection',
+            buttonNeutral: 'Ask Me Later',
+            buttonNegative: 'Cancel',
+            buttonPositive: 'OK',
+          }
+        );
+        
+        if (result === PermissionsAndroid.RESULTS.GRANTED) {
+          setHasPermission(true);
+          setError('');
+        } else {
+          setError('Camera permission denied');
+        }
       }
     } catch (error) {
       console.error('Error requesting camera permission:', error);
