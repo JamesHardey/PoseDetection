@@ -14,6 +14,10 @@ class CameraViewManager: RCTViewManager {
         return CameraView()
     }
     
+    override class func moduleName() -> String! {
+        return "CameraView"
+    }
+    
     @objc func setCameraType(_ node: NSNumber, cameraType: String) {
         DispatchQueue.main.async {
             if let component = self.bridge.uiManager.view(forReactTag: node) as? CameraView {
@@ -38,6 +42,7 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private var countdownValue = 3
     private var isCapturing = false
     private var latestSampleBuffer: CMSampleBuffer?
+    private var processingQueue = DispatchQueue(label: "com.posedetection.processing", qos: .userInitiated)
     
     private enum PoseStage {
         case frontPose
@@ -80,11 +85,27 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
     
     private func setupCamera() {
+        // Check camera permission
+        let cameraAuthStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        if cameraAuthStatus != .authorized {
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                if granted {
+                    DispatchQueue.main.async {
+                        self?.setupCamera()
+                    }
+                } else {
+                    print("Camera permission denied")
+                }
+            }
+            return
+        }
+        
         captureSession = AVCaptureSession()
         captureSession?.sessionPreset = .high
         
         guard let backCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back) else {
             print("Unable to access back camera")
+            sendStatusEvent(status: "error", message: "Camera not available")
             return
         }
         
@@ -249,41 +270,42 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         isCapturing = true
         countdownValue = 3
         
-        DispatchQueue.main.async {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
             self.countdownLabel.isHidden = false
             self.countdownLabel.text = "\(self.countdownValue)"
-        }
-        
-        countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
-            guard let self = self else {
-                timer.invalidate()
-                return
-            }
             
-            self.countdownValue -= 1
-            
-            if self.countdownValue > 0 {
-                DispatchQueue.main.async {
+            // Schedule timer on main run loop
+            self.countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                
+                self.countdownValue -= 1
+                
+                if self.countdownValue > 0 {
                     self.countdownLabel.text = "\(self.countdownValue)"
-                }
-            } else {
-                timer.invalidate()
-                self.countdownTimer = nil
-                DispatchQueue.main.async {
+                } else {
+                    timer.invalidate()
+                    self.countdownTimer = nil
                     self.countdownLabel.isHidden = true
+                    self.captureImage(for: stage)
                 }
-                self.captureImage(for: stage)
             }
         }
     }
     
     private func captureImage(for stage: PoseStage) {
         guard let sampleBuffer = latestSampleBuffer else {
+            print("No sample buffer available")
             isCapturing = false
             return
         }
         
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            print("Failed to get image buffer")
             isCapturing = false
             return
         }
@@ -292,11 +314,14 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         let context = CIContext()
         
         guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            print("Failed to create CGImage")
             isCapturing = false
             return
         }
         
-        let image = UIImage(cgImage: cgImage)
+        // Fix orientation based on camera position
+        let orientation: UIImage.Orientation = currentCamera?.position == .front ? .leftMirrored : .right
+        let image = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
         
         saveImage(image, for: stage)
     }
@@ -337,25 +362,37 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
     
     private func sendStatusEvent(status: String, message: String) {
-        guard let onCaptureStatus = onCaptureStatus else { return }
+        guard let onCaptureStatus = onCaptureStatus else { 
+            print("Warning: onCaptureStatus is nil")
+            return 
+        }
         
-        onCaptureStatus([
-            "status": status,
-            "message": message
-        ])
+        DispatchQueue.main.async {
+            onCaptureStatus([
+                "status": status,
+                "message": message
+            ])
+        }
     }
     
     private func sendImagesToReactNative() {
         guard let frontPath = frontImagePath,
-              let sidePath = sideImagePath,
-              let onBothImagesCaptured = onBothImagesCaptured else {
+              let sidePath = sideImagePath else {
+            print("Error: Missing image paths - front: \(frontImagePath ?? "nil"), side: \(sideImagePath ?? "nil")")
             return
         }
         
-        onBothImagesCaptured([
-            "frontImageUri": "file://\(frontPath)",
-            "sideImageUri": "file://\(sidePath)"
-        ])
+        guard let onBothImagesCaptured = onBothImagesCaptured else {
+            print("Warning: onBothImagesCaptured is nil")
+            return
+        }
+        
+        DispatchQueue.main.async {
+            onBothImagesCaptured([
+                "frontImageUri": "file://\(frontPath)",
+                "sideImageUri": "file://\(sidePath)"
+            ])
+        }
     }
     
     deinit {
