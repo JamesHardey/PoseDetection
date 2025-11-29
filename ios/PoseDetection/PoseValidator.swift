@@ -21,7 +21,7 @@ class PoseValidator {
         let elbowAngle: Double = 180.0
         let spineAngle: Double = 10.0
         let hipAngle: Double = 180.0
-        let tolerance: Double = 20.0
+        let tolerance: Double = 30.0  // Increased tolerance for better detection
     }
     
     let referencePose = ReferencePose()
@@ -152,7 +152,8 @@ class PoseValidator {
         let hipsLevel = abs(metrics.hipAngleLeft - referencePose.hipAngle) < referencePose.tolerance &&
                        abs(metrics.hipAngleRight - referencePose.hipAngle) < referencePose.tolerance
         
-        return shouldersLevel && armsRelaxed && spineErect && hipsLevel
+        // Debug logging
+        print(\"📊 Pose Metrics:\")\n        print(\"  Shoulders: L=\\(String(format: \"%.1f\", metrics.shoulderAngleLeft))° R=\\(String(format: \"%.1f\", metrics.shoulderAngleRight))° (target: \\(referencePose.shoulderAngle)° ± \\(referencePose.tolerance)°)\")\n        print(\"  Elbows: L=\\(String(format: \"%.1f\", metrics.elbowAngleLeft))° R=\\(String(format: \"%.1f\", metrics.elbowAngleRight))° (target: \\(referencePose.elbowAngle)° ± \\(referencePose.tolerance)°)\")\n        print(\"  Spine: \\(String(format: \"%.1f\", metrics.spineAngle))° (max: \\(referencePose.spineAngle + referencePose.tolerance)°)\")\n        print(\"  Hips: L=\\(String(format: \"%.1f\", metrics.hipAngleLeft))° R=\\(String(format: \"%.1f\", metrics.hipAngleRight))° (target: \\(referencePose.hipAngle)° ± \\(referencePose.tolerance)°)\")\n        print(\"✅ Checks: Shoulders=\\(shouldersLevel), Arms=\\(armsRelaxed), Spine=\\(spineErect), Hips=\\(hipsLevel)\")\n        \n        return shouldersLevel && armsRelaxed && spineErect && hipsLevel
     }
     
     // Legacy helper methods for backward compatibility

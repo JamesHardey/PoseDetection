@@ -52,9 +52,21 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private var currentStage: PoseStage = .frontPose
     private var frontImagePath: String?
     private var sideImagePath: String?
+    private var initialCameraType: String = "front"
+    
+    @objc var cameraType: NSString = "front" {
+        didSet {
+            initialCameraType = cameraType as String
+            if captureSession == nil {
+                setupCamera()
+            }
+        }
+    }
     
     @objc var onCaptureStatus: RCTDirectEventBlock?
     @objc var onBothImagesCaptured: RCTDirectEventBlock?
+    
+    private let poseOverlayView = PoseOverlayView()
     
     private let countdownLabel: UILabel = {
         let label = UILabel()
@@ -76,6 +88,16 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     }
     
     private func setupUI() {
+        // Add pose overlay
+        addSubview(poseOverlayView)
+        poseOverlayView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            poseOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            poseOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            poseOverlayView.topAnchor.constraint(equalTo: topAnchor),
+            poseOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        
         addSubview(countdownLabel)
         countdownLabel.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -103,17 +125,18 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         captureSession = AVCaptureSession()
         captureSession?.sessionPreset = .high
         
-        // Use front camera by default
-        guard let frontCamera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) else {
-            print("Unable to access front camera")
+        // Use camera based on prop (default: front)
+        let position: AVCaptureDevice.Position = initialCameraType == "front" ? .front : .back
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            print("Unable to access \(initialCameraType) camera")
             sendStatusEvent(status: "error", message: "Camera not available")
             return
         }
         
-        currentCamera = frontCamera
+        currentCamera = camera
         
         do {
-            let input = try AVCaptureDeviceInput(device: frontCamera)
+            let input = try AVCaptureDeviceInput(device: camera)
             
             if captureSession?.canAddInput(input) == true {
                 captureSession?.addInput(input)
@@ -149,6 +172,7 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         previewLayer?.frame = bounds
+        poseOverlayView.frame = bounds
     }
     
     @objc func setCameraType(_ type: String) {
@@ -218,6 +242,22 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
             do {
                 let recognizedPoints = try observation.recognizedPoints(.all)
                 self.processPose(recognizedPoints)
+                
+                // Update overlay with detected landmarks
+                DispatchQueue.main.async {
+                    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+                    let imageSize = CGSize(
+                        width: CVPixelBufferGetWidth(pixelBuffer),
+                        height: CVPixelBufferGetHeight(pixelBuffer)
+                    )
+                    self.poseOverlayView.updatePose(
+                        recognizedPoints,
+                        imageSize: imageSize,
+                        perfect: false,
+                        countdown: self.countdownValue,
+                        counting: self.isCapturing
+                    )
+                }
             } catch {
                 print("Error processing pose: \(error)")
             }
@@ -244,9 +284,8 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     private func processFrontPose(_ landmarks: [VNHumanBodyPoseObservation.JointName: VNRecognizedPoint]) {
         let (isValid, feedback) = bodyPositionChecker.checkPose(landmarks)
         
-        DispatchQueue.main.async {
-            self.voiceFeedback.provideFeedback(feedback)
-        }
+        // Voice feedback will handle main thread dispatch internally
+        voiceFeedback.provideFeedback(feedback)
         
         if isValid {
             sendStatusEvent(status: "ready_to_capture", message: "Ready to capture front pose!")
@@ -259,9 +298,8 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
             sendStatusEvent(status: "ready_to_capture_side", message: "Ready to capture side pose!")
             startCountdown(for: .sidePose)
         } else {
-            DispatchQueue.main.async {
-                self.voiceFeedback.provideFeedback("Turn sideways completely")
-            }
+            // Voice feedback will handle main thread dispatch internally
+            voiceFeedback.provideFeedback("Turn sideways completely")
         }
     }
     
@@ -344,9 +382,8 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
                 frontImagePath = fileURL.path
                 sendStatusEvent(status: "front_pose_captured", message: "Front pose captured! Turn sideways...")
                 
-                DispatchQueue.main.async {
-                    self.voiceFeedback.provideFeedback("Great! Now turn sideways for the side pose")
-                }
+                // Voice feedback will handle main thread dispatch internally
+                voiceFeedback.provideFeedback("Great! Now turn sideways for the side pose")
                 
                 currentStage = .sidePose
                 isCapturing = false

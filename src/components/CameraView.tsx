@@ -24,7 +24,7 @@ const NativeCameraView = requireNativeComponent<CameraViewProps>('CameraView');
 
 export const CameraView: React.FC<CameraViewProps> = ({
   style,
-  cameraType = 'back',
+  cameraType = 'front',
   onBothCaptured,
 }) => {
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);

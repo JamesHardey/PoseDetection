@@ -42,6 +42,8 @@
 	<string>This app needs access to save your pose images</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>This app needs permission to save photos to your library</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>This app uses speech to provide audio feedback for pose corrections</string>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>

@@ -5,6 +5,7 @@
 
 RCT_EXPORT_VIEW_PROPERTY(onCaptureStatus, RCTDirectEventBlock)
 RCT_EXPORT_VIEW_PROPERTY(onBothImagesCaptured, RCTDirectEventBlock)
+RCT_EXPORT_VIEW_PROPERTY(cameraType, NSString)
 
 RCT_EXTERN_METHOD(setCameraType:(nonnull NSNumber *)node cameraType:(NSString *)cameraType)
 
