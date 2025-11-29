@@ -21,7 +21,7 @@ class CameraViewManager: RCTViewManager {
     @objc func setCameraType(_ node: NSNumber, cameraType: String) {
         DispatchQueue.main.async {
             if let component = self.bridge.uiManager.view(forReactTag: node) as? CameraView {
-                component.setCameraType(cameraType)
+                component.updateCameraType(cameraType)
             }
         }
     }
@@ -175,7 +175,7 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         poseOverlayView.frame = bounds
     }
     
-    @objc func setCameraType(_ type: String) {
+    @objc func updateCameraType(_ type: String) {
         guard let session = captureSession else { return }
         
         session.beginConfiguration()

@@ -143,16 +143,24 @@ class PoseValidator {
     func isPoseAccurate(_ metrics: PostureMetrics) -> Bool {
         let shouldersLevel = abs(metrics.shoulderAngleLeft - referencePose.shoulderAngle) < referencePose.tolerance &&
                             abs(metrics.shoulderAngleRight - referencePose.shoulderAngle) < referencePose.tolerance
-        
+
         let armsRelaxed = abs(metrics.elbowAngleLeft - referencePose.elbowAngle) < referencePose.tolerance &&
                          abs(metrics.elbowAngleRight - referencePose.elbowAngle) < referencePose.tolerance
-        
+
         let spineErect = metrics.spineAngle < referencePose.spineAngle + referencePose.tolerance
-        
+
         let hipsLevel = abs(metrics.hipAngleLeft - referencePose.hipAngle) < referencePose.tolerance &&
                        abs(metrics.hipAngleRight - referencePose.hipAngle) < referencePose.tolerance
-        
+
         // Debug logging
+        print("📊 Pose Metrics:")
+        print("  Shoulders: L=\(String(format: \"%.1f\", metrics.shoulderAngleLeft))° R=\(String(format: \"%.1f\", metrics.shoulderAngleRight))° (target: \(referencePose.shoulderAngle)° ± \(referencePose.tolerance)°)")
+        print("  Elbows: L=\(String(format: \"%.1f\", metrics.elbowAngleLeft))° R=\(String(format: \"%.1f\", metrics.elbowAngleRight))° (target: \(referencePose.elbowAngle)° ± \(referencePose.tolerance)°)")
+        print("  Spine: \(String(format: \"%.1f\", metrics.spineAngle))° (max: \(referencePose.spineAngle + referencePose.tolerance)°)")
+        print("  Hips: L=\(String(format: \"%.1f\", metrics.hipAngleLeft))° R=\(String(format: \"%.1f\", metrics.hipAngleRight))° (target: \(referencePose.hipAngle)° ± \(referencePose.tolerance)°)")
+        print("✅ Checks: Shoulders=\(shouldersLevel), Arms=\(armsRelaxed), Spine=\(spineErect), Hips=\(hipsLevel)")
+
+        return shouldersLevel && armsRelaxed && spineErect && hipsLevel
     }
     
     // Legacy helper methods for backward compatibility
