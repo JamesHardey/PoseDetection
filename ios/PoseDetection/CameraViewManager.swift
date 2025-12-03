@@ -154,8 +154,12 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
             previewLayer?.frame = bounds
             
             if let previewLayer = previewLayer {
-                layer.addSublayer(previewLayer)
+                layer.insertSublayer(previewLayer, at: 0)
             }
+            
+            // Ensure overlay is on top
+            bringSubviewToFront(poseOverlayView)
+            bringSubviewToFront(countdownLabel)
             
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 self?.captureSession?.startRunning()
@@ -173,6 +177,10 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
         super.layoutSubviews()
         previewLayer?.frame = bounds
         poseOverlayView.frame = bounds
+        
+        // Ensure overlay stays on top after layout changes
+        bringSubviewToFront(poseOverlayView)
+        bringSubviewToFront(countdownLabel)
     }
     
     @objc func updateCameraType(_ type: String) {
