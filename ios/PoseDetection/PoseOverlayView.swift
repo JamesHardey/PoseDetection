@@ -11,7 +11,10 @@ class PoseOverlayView: UIView {
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        isOpaque = false
         isUserInteractionEnabled = false
+        contentMode = .redraw
+        clearsContextBeforeDrawing = true
     }
     
     required init?(coder: NSCoder) {
@@ -28,15 +31,31 @@ class PoseOverlayView: UIView {
         self.isPerfectPose = perfect
         self.countdownValue = countdown
         self.isCountingDown = counting
+        
+        print("🖼️ PoseOverlayView.updatePose called - landmarks: \(newLandmarks?.count ?? 0), imageSize: \(imageSize), bounds: \(bounds)")
+        
         setNeedsDisplay()
     }
     
     override func draw(_ rect: CGRect) {
-        guard let context = UIGraphicsGetCurrentContext() else { return }
-        guard let landmarks = landmarks, imageSize.width > 0, imageSize.height > 0 else { return }
+        guard let context = UIGraphicsGetCurrentContext() else {
+            print("❌ No graphics context!")
+            return
+        }
+        
+        print("🎨 PoseOverlayView.draw called - rect: \(rect), bounds: \(bounds)")
+        
+        guard let landmarks = landmarks, imageSize.width > 0, imageSize.height > 0 else {
+            print("⚠️ No landmarks or invalid imageSize - landmarks: \(landmarks?.count ?? 0), imageSize: \(imageSize)")
+            return
+        }
+        
+        print("✅ Drawing \(landmarks.count) landmarks")
         
         let scaleX = bounds.width / imageSize.width
         let scaleY = bounds.height / imageSize.height
+        
+        print("📐 Scale factors - scaleX: \(scaleX), scaleY: \(scaleY)")
         
         // Draw connections
         drawConnections(context: context, landmarks: landmarks, scaleX: scaleX, scaleY: scaleY)

@@ -176,8 +176,8 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
     override func layoutSubviews() {
         super.layoutSubviews()
         previewLayer?.frame = bounds
-        poseOverlayView.frame = bounds
         
+        // Don't set frame manually - using Auto Layout constraints
         // Ensure overlay stays on top after layout changes
         bringSubviewToFront(poseOverlayView)
         bringSubviewToFront(countdownLabel)
@@ -239,11 +239,18 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
             
             if let error = error {
                 print("Pose detection error: \(error)")
+                DispatchQueue.main.async {
+                    self.poseOverlayView.updatePose(nil, imageSize: .zero)
+                }
                 return
             }
             
             guard let observations = request.results as? [VNHumanBodyPoseObservation],
                   let observation = observations.first else {
+                print("No pose detected in frame")
+                DispatchQueue.main.async {
+                    self.poseOverlayView.updatePose(nil, imageSize: .zero)
+                }
                 return
             }
             
@@ -258,6 +265,9 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
                         width: CVPixelBufferGetWidth(pixelBuffer),
                         height: CVPixelBufferGetHeight(pixelBuffer)
                     )
+                    
+                    print("🎨 Updating overlay with \(recognizedPoints.count) landmarks, imageSize: \(imageSize)")
+                    
                     self.poseOverlayView.updatePose(
                         recognizedPoints,
                         imageSize: imageSize,
@@ -268,6 +278,9 @@ class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
             } catch {
                 print("Error processing pose: \(error)")
+                DispatchQueue.main.async {
+                    self.poseOverlayView.updatePose(nil, imageSize: .zero)
+                }
             }
         }
         
