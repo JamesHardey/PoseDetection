@@ -1,0 +1,538 @@
+import Foundation
+import React
+import AVFoundation
+import Vision
+import ImageIO
+import MLKitPoseDetection
+import MLKitVision
+import CoreGraphics
+ 
+
+@objc(CameraViewManager)
+class CameraViewManager: RCTViewManager {
+    
+    override static func requiresMainQueueSetup() -> Bool {
+        return true
+    }
+    
+    override func view() -> UIView! {
+        return CameraView()
+    }
+    
+    override class func moduleName() -> String! {
+        return "CameraView"
+    }
+    
+    @objc func setCameraType(_ node: NSNumber, cameraType: String) {
+        DispatchQueue.main.async {
+            if let component = self.bridge.uiManager.view(forReactTag: node) as? CameraView {
+                component.updateCameraType(cameraType)
+            }
+        }
+    }
+}
+
+class CameraView: UIView, AVCaptureVideoDataOutputSampleBufferDelegate {
+    private var captureSession: AVCaptureSession?
+    private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var videoOutput: AVCaptureVideoDataOutput?
+    private var currentCamera: AVCaptureDevice?
+    
+    private let poseValidator = PoseValidator()
+    private let sidePoseValidator = SidePoseValidator()
+    private let bodyPositionChecker = BodyPositionChecker()
+    private let voiceFeedback = VoiceFeedbackProvider()
+    
+    private var countdownTimer: Timer?
+    private var countdownValue = 3
+    private var isCapturing = false
+    private var latestSampleBuffer: CMSampleBuffer?
+    private let processingQueue = DispatchQueue(label: "com.posedetection.processing", qos: .userInitiated)
+    private let poseDetector: PoseDetector = {
+        let options = PoseDetectorOptions()
+        options.detectorMode = .stream
+        return PoseDetector.poseDetector(options: options)
+    }()
+    
+    private enum PoseStage {
+        case frontPose
+        case sidePose
+    }
+    
+    private var currentStage: PoseStage = .frontPose
+    private var frontImagePath: String?
+    private var sideImagePath: String?
+    private var initialCameraType: String = "front"
+    
+    @objc var cameraType: NSString = "front" {
+        didSet {
+            initialCameraType = cameraType as String
+            if captureSession == nil {
+                setupCamera()
+            }
+        }
+    }
+    
+    @objc var onCaptureStatus: RCTDirectEventBlock?
+    @objc var onBothImagesCaptured: RCTDirectEventBlock?
+    
+    private let poseOverlayView = PoseOverlayView()
+    
+    private let countdownLabel: UILabel = {
+        let label = UILabel()
+        label.textColor = .white
+        label.font = UIFont.boldSystemFont(ofSize: 72)
+        label.textAlignment = .center
+        label.isHidden = true
+        return label
+    }()
+    
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        setupCamera()
+        setupUI()
+    }
+    
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+    
+    private func setupUI() {
+        // Add pose overlay
+        addSubview(poseOverlayView)
+        poseOverlayView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            poseOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
+            poseOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            poseOverlayView.topAnchor.constraint(equalTo: topAnchor),
+            poseOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ])
+        
+        addSubview(countdownLabel)
+        countdownLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            countdownLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            countdownLabel.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+    
+    private func setupCamera() {
+        // Check camera permission
+        let cameraAuthStatus = AVCaptureDevice.authorizationStatus(for: .video)
+        if cameraAuthStatus != .authorized {
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                if granted {
+                    DispatchQueue.main.async {
+                        self?.setupCamera()
+                    }
+                } else {
+                    print("Camera permission denied")
+                }
+            }
+            return
+        }
+        
+        captureSession = AVCaptureSession()
+        captureSession?.sessionPreset = .high
+        
+        // Use camera based on prop (default: front)
+        let position: AVCaptureDevice.Position = initialCameraType == "front" ? .front : .back
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            print("Unable to access \(initialCameraType) camera")
+            sendStatusEvent(status: "error", message: "Camera not available")
+            return
+        }
+        
+        currentCamera = camera
+        
+        do {
+            let input = try AVCaptureDeviceInput(device: camera)
+            
+            if captureSession?.canAddInput(input) == true {
+                captureSession?.addInput(input)
+            }
+            
+            videoOutput = AVCaptureVideoDataOutput()
+            videoOutput?.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            videoOutput?.alwaysDiscardsLateVideoFrames = true
+            videoOutput?.setSampleBufferDelegate(self, queue: DispatchQueue(label: "videoQueue"))
+            
+            if captureSession?.canAddOutput(videoOutput!) == true {
+                captureSession?.addOutput(videoOutput!)
+            }
+
+            if let connection = videoOutput?.connection(with: .video) {
+                connection.videoOrientation = .portrait
+                connection.isVideoMirrored = position == .front
+            }
+            
+            previewLayer = AVCaptureVideoPreviewLayer(session: captureSession!)
+            previewLayer?.videoGravity = .resizeAspectFill
+            previewLayer?.frame = bounds
+            
+            if let previewLayer = previewLayer {
+                layer.insertSublayer(previewLayer, at: 0)
+            }
+            
+            // Ensure overlay is on top
+            bringSubviewToFront(poseOverlayView)
+            bringSubviewToFront(countdownLabel)
+            
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.captureSession?.startRunning()
+                DispatchQueue.main.async {
+                    self?.sendStatusEvent(status: "camera_started", message: "Camera started and ready!")
+                }
+            }
+            
+        } catch {
+            print("Error setting up camera: \(error)")
+        }
+    }
+    
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer?.frame = bounds
+        
+        // Don't set frame manually - using Auto Layout constraints
+        // Ensure overlay stays on top after layout changes
+        bringSubviewToFront(poseOverlayView)
+        bringSubviewToFront(countdownLabel)
+    }
+    
+    @objc func updateCameraType(_ type: String) {
+        guard let session = captureSession else { return }
+        
+        session.beginConfiguration()
+        
+        // Remove existing inputs
+        if let currentInput = session.inputs.first as? AVCaptureDeviceInput {
+            session.removeInput(currentInput)
+        }
+        
+        let position: AVCaptureDevice.Position = type == "front" ? .front : .back
+        guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) else {
+            session.commitConfiguration()
+            return
+        }
+        
+        currentCamera = camera
+        
+        do {
+            let input = try AVCaptureDeviceInput(device: camera)
+            if session.canAddInput(input) {
+                session.addInput(input)
+            }
+        } catch {
+            print("Error switching camera: \(error)")
+        }
+        
+        session.commitConfiguration()
+        
+        // Reset detection state
+        resetDetectionState()
+    }
+    
+    private func resetDetectionState() {
+        isCapturing = false
+        countdownTimer?.invalidate()
+        countdownTimer = nil
+        countdownValue = 3
+        DispatchQueue.main.async {
+            self.countdownLabel.isHidden = true
+        }
+    }
+    
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Store latest sample buffer for capture
+        latestSampleBuffer = sampleBuffer
+        
+        guard !isCapturing else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // Snapshot values needed inside async block
+        let isMirrored = connection.isVideoMirrored
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+
+        processingQueue.async { [weak self] in
+            guard let self = self else { return }
+
+            // ML Kit Pose Detection (streaming mode per docs)
+            let visionImage = VisionImage(buffer: sampleBuffer)
+            visionImage.orientation = self.mlkitImageOrientation(
+                deviceOrientation: UIDevice.current.orientation,
+                cameraPosition: self.currentCamera?.position ?? .back
+            )
+
+            self.poseDetector.process(visionImage) { [weak self] poses, error in
+                guard let self = self else { return }
+                if let error = error {
+                    print("⚠️ ML Kit error: \(error.localizedDescription)")
+                    DispatchQueue.main.async {
+                        self.poseOverlayView.updatePose(nil, imageSize: CGSize(width: width, height: height))
+                    }
+                    return
+                }
+
+                print("🔍 ML Kit callback: \(poses?.count ?? 0) poses detected")
+                
+                guard let pose = poses?.first else {
+                    print("⚠️ No pose in frame (poses=\(poses == nil ? "nil" : "empty"))")
+                    DispatchQueue.main.async {
+                        self.poseOverlayView.updatePose(nil, imageSize: CGSize(width: width, height: height))
+                    }
+                    return
+                }
+                
+                print("✅ Pose found with \(pose.landmarks.count) landmarks")
+
+                // Map ML Kit landmarks to shared dictionary (keep pixel coordinates, not normalized)
+                var points: PoseLandmarks = [:]
+                func add(_ type: PoseLandmarkType, _ joint: JointName) {
+                    let lm = pose.landmark(ofType: type)
+                    let location = CGPoint(x: CGFloat(lm.position.x), y: CGFloat(lm.position.y))
+                    points[joint] = RecognizedPointCompat(location: location, confidence: lm.inFrameLikelihood)
+                }
+                let leftShoulderLM = pose.landmark(ofType: .leftShoulder)
+                let rightShoulderLM = pose.landmark(ofType: .rightShoulder)
+                add(.leftShoulder, .leftShoulder)
+                add(.rightShoulder, .rightShoulder)
+                add(.leftElbow, .leftElbow)
+                add(.rightElbow, .rightElbow)
+                add(.leftWrist, .leftWrist)
+                add(.rightWrist, .rightWrist)
+                add(.leftHip, .leftHip)
+                add(.rightHip, .rightHip)
+                add(.leftKnee, .leftKnee)
+                add(.rightKnee, .rightKnee)
+                add(.leftAnkle, .leftAnkle)
+                add(.rightAnkle, .rightAnkle)
+                
+                // Add neck (average of shoulders if not available)
+              _ = pose.landmark(ofType: .nose) // ML Kit doesn't have neck, approximate
+                let neckLocation = CGPoint(
+                    x: (CGFloat(leftShoulderLM.position.x) + CGFloat(rightShoulderLM.position.x)) / 2,
+                    y: (CGFloat(leftShoulderLM.position.y) + CGFloat(rightShoulderLM.position.y)) / 2
+                )
+                points[.neck] = RecognizedPointCompat(location: neckLocation, confidence: min(leftShoulderLM.inFrameLikelihood, rightShoulderLM.inFrameLikelihood))
+                
+                let nose = pose.landmark(ofType: .nose)
+                let noseLocation = CGPoint(x: CGFloat(nose.position.x), y: CGFloat(nose.position.y))
+                points[.nose] = RecognizedPointCompat(location: noseLocation, confidence: nose.inFrameLikelihood)
+
+                // Calculate accuracy for overlay coloring
+                let accuracy = self.poseValidator.calculatePostureMetrics(points).map {
+                    self.poseValidator.compareWithReference($0)
+                }
+                
+                self.processPose(points)
+
+                let imageSize = CGSize(width: width, height: height)
+                print("🎨 Updating overlay with \(points.count) landmarks, imageSize: \(imageSize), mirrored: \(isMirrored)")
+                DispatchQueue.main.async {
+                    self.poseOverlayView.updatePose(points,
+                        imageSize: imageSize,
+                        accuracy: accuracy,
+                        perfect: false,
+                        countdown: self.countdownValue,
+                        counting: self.isCapturing,
+                        mirrored: isMirrored)
+                }
+            }
+        }
+    }
+    
+    private func processPose(_ landmarks: PoseLandmarks) {
+        switch currentStage {
+        case .frontPose:
+            processFrontPose(landmarks)
+        case .sidePose:
+            processSidePose(landmarks)
+        }
+    }
+    
+    private func processFrontPose(_ landmarks: PoseLandmarks) {
+        let (isValid, feedback) = bodyPositionChecker.checkPose(landmarks)
+        
+        // Voice feedback will handle main thread dispatch internally
+        voiceFeedback.provideFeedback(feedback)
+        
+        if isValid {
+            sendStatusEvent(status: "ready_to_capture", message: "Ready to capture front pose!")
+            startCountdown(for: .frontPose)
+        }
+    }
+    
+    private func processSidePose(_ landmarks: PoseLandmarks) {
+        if sidePoseValidator.isValidSidePose(landmarks) {
+            sendStatusEvent(status: "ready_to_capture_side", message: "Ready to capture side pose!")
+            startCountdown(for: .sidePose)
+        } else {
+            // Voice feedback will handle main thread dispatch internally
+            voiceFeedback.provideFeedback("Turn sideways completely")
+        }
+    }
+    
+    private func startCountdown(for stage: PoseStage) {
+        guard countdownTimer == nil else { return }
+        
+        isCapturing = true
+        countdownValue = 3
+        
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            
+            self.countdownLabel.isHidden = false
+            self.countdownLabel.text = "\(self.countdownValue)"
+            
+            // Schedule timer on main run loop
+            self.countdownTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] timer in
+                guard let self = self else {
+                    timer.invalidate()
+                    return
+                }
+                
+                self.countdownValue -= 1
+                
+                if self.countdownValue > 0 {
+                    self.countdownLabel.text = "\(self.countdownValue)"
+                } else {
+                    timer.invalidate()
+                    self.countdownTimer = nil
+                    self.countdownLabel.isHidden = true
+                    self.captureImage(for: stage)
+                }
+            }
+        }
+    }
+    
+    private func captureImage(for stage: PoseStage) {
+        guard let sampleBuffer = latestSampleBuffer else {
+            print("No sample buffer available")
+            isCapturing = false
+            return
+        }
+        
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+            print("Failed to get image buffer")
+            isCapturing = false
+            return
+        }
+        
+        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
+        let context = CIContext()
+        
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else {
+            print("Failed to create CGImage")
+            isCapturing = false
+            return
+        }
+        
+        // Fix orientation based on camera position
+        let orientation: UIImage.Orientation = currentCamera?.position == .front ? .leftMirrored : .right
+        let image = UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
+        
+        saveImage(image, for: stage)
+    }
+    
+    private func saveImage(_ image: UIImage, for stage: PoseStage) {
+        guard let data = image.jpegData(compressionQuality: 0.9) else {
+            isCapturing = false
+            return
+        }
+        
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        let fileName = stage == .frontPose ? "front_pose_\(Date().timeIntervalSince1970).jpg" : "side_pose_\(Date().timeIntervalSince1970).jpg"
+        let fileURL = cacheDir.appendingPathComponent(fileName)
+        
+        do {
+            try data.write(to: fileURL)
+            
+            if stage == .frontPose {
+                frontImagePath = fileURL.path
+                sendStatusEvent(status: "front_pose_captured", message: "Front pose captured! Turn sideways...")
+                
+                // Voice feedback will handle main thread dispatch internally
+                voiceFeedback.provideFeedback("Great! Now turn sideways for the side pose")
+                
+                currentStage = .sidePose
+                isCapturing = false
+            } else {
+                sideImagePath = fileURL.path
+                sendStatusEvent(status: "both_poses_captured", message: "Both poses captured! Processing...")
+                sendImagesToReactNative()
+            }
+            
+        } catch {
+            print("Error saving image: \(error)")
+            isCapturing = false
+        }
+    }
+    
+    private func sendStatusEvent(status: String, message: String) {
+        guard let onCaptureStatus = onCaptureStatus else { 
+            print("Warning: onCaptureStatus is nil")
+            return 
+        }
+        
+        DispatchQueue.main.async {
+            onCaptureStatus([
+                "status": status,
+                "message": message
+            ])
+        }
+    }
+    
+    private func sendImagesToReactNative() {
+        guard let frontPath = frontImagePath,
+              let sidePath = sideImagePath else {
+//            print("Error: Missing image paths - front: \(frontImagePath ?? \"nil\"), side: \(sideImagePath ?? \"nil\")")
+            sendStatusEvent(status: "capture_incomplete", message: "Images not saved, please retake")
+            return
+        }
+        
+        guard let onBothImagesCaptured = onBothImagesCaptured else {
+            print("Warning: onBothImagesCaptured is nil")
+            return
+        }
+        
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: frontPath), fileManager.fileExists(atPath: sidePath) else {
+            print("Error: Image files missing on disk")
+            sendStatusEvent(status: "capture_incomplete", message: "Images not saved, please retake")
+            return
+        }
+        
+        DispatchQueue.main.async {
+            onBothImagesCaptured([
+                "frontImageUri": "file://\(frontPath)",
+                "sideImageUri": "file://\(sidePath)"
+            ])
+        }
+    }
+
+    // ML Kit orientation helper per docs
+    private func mlkitImageOrientation(deviceOrientation: UIDeviceOrientation, cameraPosition: AVCaptureDevice.Position) -> UIImage.Orientation {
+        switch deviceOrientation {
+        case .portrait:
+            return cameraPosition == .front ? .leftMirrored : .right
+        case .landscapeLeft:
+            return cameraPosition == .front ? .downMirrored : .up
+        case .portraitUpsideDown:
+            return cameraPosition == .front ? .rightMirrored : .left
+        case .landscapeRight:
+            return cameraPosition == .front ? .upMirrored : .down
+        case .faceDown, .faceUp, .unknown:
+            return .up
+        @unknown default:
+            return .up
+        }
+    }
+    
+    deinit {
+        captureSession?.stopRunning()
+        voiceFeedback.stop()
+        countdownTimer?.invalidate()
+    }
+}

@@ -23,6 +23,10 @@ target 'PoseDetection' do
     :app_path => "#{Pod::Config.instance.installation_root}/.."
   )
 
+  # Google ML Kit Pose Detection for iOS
+  pod 'GoogleMLKit/PoseDetectionAccurate'
+  pod 'GoogleMLKit/PoseDetection'
+
   post_install do |installer|
     react_native_post_install(
       installer,

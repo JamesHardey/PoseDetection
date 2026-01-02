@@ -28,22 +28,23 @@
 	<true/>
 	<key>NSAppTransportSecurity</key>
 	<dict>
-	  <!-- Do not change NSAllowsArbitraryLoads to true, or you will risk app rejection! -->
 		<key>NSAllowsArbitraryLoads</key>
 		<false/>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string></string>
 	<key>NSCameraUsageDescription</key>
 	<string>This app needs access to your camera for pose detection</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>This app needs access to save your pose images</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string></string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>This app needs permission to save photos to your library</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app needs access to save your pose images</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>This app uses speech to provide audio feedback for pose corrections</string>
+	<key>RCTNewArchEnabled</key>
+	<true/>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIRequiredDeviceCapabilities</key>
